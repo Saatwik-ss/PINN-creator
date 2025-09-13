@@ -1,0 +1,112 @@
+import torch
+import torch.nn as nn
+import torch.autograd as autograd
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+
+class PINN(nn.Module):
+    def __init__(self, layers):
+        super(PINN, self).__init__()
+        self.layers = nn.ModuleList()
+        for i in range(len(layers)-1):
+            self.layers.append(nn.Linear(layers[i], layers[i+1]))
+        self.activation = nn.Tanh()
+
+    def forward(self, x):
+        for i in range(len(self.layers)-1):
+            x = self.activation(self.layers[i](x))
+        return self.layers[-1](x)
+
+
+# Utility: compute nth derivative using autograd
+def nth_derivative(u, x, n):
+    for _ in range(n):
+        u = autograd.grad(
+            u, x, grad_outputs=torch.ones_like(u),
+            create_graph=True, retain_graph=True
+        )[0]
+    return u
+
+
+def pde_residual(model, x, order):
+    x.requires_grad = True
+    u = model(x)
+
+    # nth derivative of u
+    dnu = nth_derivative(u, x, order)
+
+    # Example PDEs:
+
+    if order == 1:
+        # u'(x) = cos(x), true solution u(x) = sin(x)
+        f = torch.cos(x)
+        residual = dnu - f
+
+    elif order == 2:
+        # u''(x) = -pi^2 sin(pi x), true solution u(x) = sin(pi x)
+        f = -(np.pi**2) * torch.sin(np.pi * x)
+        residual = dnu - f
+
+    elif order == 3:
+        # u'''(x) = -pi^3 cos(pi x), true solution u(x) = sin(pi x)
+        f = -(np.pi**3) * torch.cos(np.pi * x)
+        residual = dnu - f
+
+    else:
+        raise NotImplementedError("Only supports orders 1, 2, 3")
+
+    return residual
+
+
+def train(order=2):
+    model = PINN([1, 32, 32, 1])
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    for epoch in range(5000):
+        optimizer.zero_grad()
+
+        # Collocation points
+        x = torch.rand(100, 1)
+        res = pde_residual(model, x, order)
+        loss_pde = torch.mean(res**2)
+
+        # Boundary conditions (letting: u(0)=0, u(1)=0)
+        xb = torch.tensor([[0.0], [1.0]])
+        ub = torch.zeros_like(xb)
+        loss_bc = torch.mean((model(xb) - ub)**2)
+
+        loss = loss_pde + loss_bc
+        loss.backward()
+        optimizer.step()
+
+        if epoch % 500 == 0:
+            print(f"Epoch {epoch}: Loss {loss.item():.6f}")
+
+    return model
+
+
+if __name__ == "__main__":
+    order = 2   # Order(1/2/3)
+    model = train(order=order)
+
+    # Test points
+    x_test = torch.linspace(0, 1, 200).unsqueeze(1)
+    u_pred = model(x_test).detach().numpy()
+
+    # Exact solution for plotting
+    if order == 1:
+        u_exact = np.sin(x_test.numpy())
+    elif order == 2:
+        u_exact = np.sin(np.pi * x_test.numpy())
+    elif order == 3:
+        u_exact = np.sin(np.pi * x_test.numpy())
+    else:
+        u_exact = None
+    plt.plot(x_test, u_pred, '--', label="PINN")
+    if u_exact is not None:
+        plt.plot(x_test, u_exact, label="Exact")
+    plt.legend()
+    plt.title(f"{order} PDE")
+    plt.show()
